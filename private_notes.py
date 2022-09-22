@@ -1,3 +1,6 @@
+# Marten Quadland
+# Clare Wooten
+
 import pickle
 
 class PrivNotes:
