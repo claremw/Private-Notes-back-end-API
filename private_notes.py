@@ -1,6 +1,15 @@
 # Marten Quadland
 # Clare Wooten
 
+""" 
+You will implement the API for a back-end implementation of a note taking application. The note taking
+application will internally maintain a key-value store that maps note titles (keys) to notes (values). For our
+purposes, note titles will always be unique. The API will support serialization and deserialization methods
+for loading and writing the contents of the notes to disk (or cloud storage), as well as methods for adding,
+fetching, and removing notes. We impose the following security requirements on both the serialized as
+well as the in-memory representation of the key-value store:
+""" 
+
 import pickle
 
 class PrivNotes:
