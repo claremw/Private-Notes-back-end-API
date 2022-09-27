@@ -53,7 +53,12 @@ assume that the adversary has complete knowledge of your source code.
 
 """ 
 
+import os
 import pickle
+from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat import backends
+import hashlib
 
 class PrivNotes:
   MAX_NOTE_LEN = 2048;
@@ -82,10 +87,15 @@ class PrivNotes:
     
     # case 1: If data is not provided, then this method should initialize an empty note database with the 
     # provided password as the password 
-    self.kvs = {} 
+    if data is None:
+      self.kvs = {}
+      self.password = password
+      self.kdf = PBKDF2HMAC(algorithm = hashes.SHA256(), length = 32, salt = os.urandom(16), iterations = 2000000, backend = backends.default_backend())
     # case 2: load the notes from data 
     if data is not None:
       self.kvs = pickle.loads(bytes.fromhex(data))
+      # if checksum is not None:
+        
 
   def dump(self):
     """Computes a serialized representation of the notes database
