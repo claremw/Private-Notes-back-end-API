@@ -51,125 +51,163 @@ derived from the source key output by PBKDF2.
 No secrets in code: You should not rely on any hard-coded secrets in your source code. You should
 assume that the adversary has complete knowledge of your source code.
 
-""" 
+"""
 
+from multiprocessing.sharedctypes import Value
 import os
 import pickle
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat import backends
-import hashlib
+import re
+
 
 class PrivNotes:
-  MAX_NOTE_LEN = 2048;
+    MAX_NOTE_LEN = 2048
 
-  def __init__(self, password, data = None, checksum = None):
-    """Constructor.
-    Args:
-      password (str) : password for accessing the notes
-      data (str) [Optional] : a hex-encoded serialized representation to load
-                              (defaults to None, which initializes an empty notes database)
-      checksum (str) [Optional] : a hex-encoded checksum used to protect the data against
-                                  possible rollback attacks (defaults to None, in which
-                                  case, no rollback protection is guaranteed)
-    Raises:
-      ValueError : malformed serialized format
+    def __init__(self, password, data=None, checksum=None):
+        """
+        Constructor.
+        Args:
+          password (str) : password for accessing the notes
+          data (str) [Optional] : a hex-encoded serialized representation to load (defaults to None, which
+                                  initializes an empty notes database)
+          checksum (str) [Optional] : a hex-encoded checksum used to protect the data against possible rollback
+                                      attacks (defaults to None, in which case, no rollback protection is guaranteed)
+        Raises:
+          ValueError : malformed serialized format
 
-    If data is not provided, then this method should initialize an empty note database with the 
-    provided password as the password. Otherwise, it should load the notes from data. In addition, if the checksum 
-    is provided, the application should additionally validate the contents of the notes database against 
-    the checksum. If the provided data is malformed, the password is incorrect, or the checksum (if provided) 
-    is invalid, this method must raise a ValueError. If this method is called with the wrong password, i.e., 
-    not the password used to initialize the provided data, your code must return a ValueError, and no other 
-    queries can be performed unless the client calls init successfully. It is incorrect for your application 
-    to pretend like nothing is wrong when the wrong password is provided and only fail to answer queries later.
-    """
-    
-    # case 1: If data is not provided, then this method should initialize an empty note database with the 
-    # provided password as the password 
-    if data is None:
-      self.kvs = {}
-      self.password = password
-      self.kdf = PBKDF2HMAC(algorithm = hashes.SHA256(), length = 32, salt = os.urandom(16), iterations = 2000000, backend = backends.default_backend())
-    # case 2: load the notes from data 
-    if data is not None:
-      self.kvs = pickle.loads(bytes.fromhex(data))
-      # if checksum is not None:
-        
+        If data is not provided, then this method should initialize an empty note database with the
+        provided password as the password. Otherwise, it should load the notes from data. In addition, if the checksum
+        is provided, the application should additionally validate the contents of the notes database against
+        the checksum. If the provided data is malformed, the password is incorrect, or the checksum (if provided)
+        is invalid, this method must raise a ValueError. If this method is called with the wrong password, i.e.,
+        not the password used to initialize the provided data, your code must return a ValueError, and no other
+        queries can be performed unless the client calls init successfully. It is incorrect for your application
+        to pretend like nothing is wrong when the wrong password is provided and only fail to answer queries later.
+        """
 
-  def dump(self):
-    """Computes a serialized representation of the notes database
-       together with a checksum.
+        # we always need a password input
+        if password is None:
+            raise ValueError("no password entered")
 
-       This method should create a hex-encoded serialization of the contents of the notes database, such that it
-       may be loaded back into memory via a subsequent call to Notes.__init__(...). It should additionally
-       output a SHA-256 hash of the serialized contents (for rollback protection).
-    
-    Returns: 
-      data (str) : a hex-encoded serialized representation of the contents of the notes
-                   database (that can be passed to the constructor)
-      checksum (str) : a hex-encoded checksum for the data used to protect
-                       against rollback attacks (up to 32 characters in length)
-    """
-    return pickle.dumps(self.kvs).hex(), ''
+        kdf = PBKDF2HMAC(
+            algorithm=hashes.SHA256(),
+            length=32,
+            salt=os.urandom(16),
+            iterations=2000000,
+            backend=backends.default_backend(),
+        )
 
-  def get(self, title):
-    """Fetches the note associated with a title.
+        # case 1: If data is not provided, then this method should initialize an empty note database with the
+        # provided password as the password
+        if data is None:
+            self.kvs = {}
+            self.key = kdf.derive(bytes(password, "ascii"))
+        # case 2: If data is not none, check inputs and load notes from data
+        else:
+            # if we have a data value, we need a checksum value
+            if checksum is not None:
+                # check to make sure data is not malformed
+                if re.fullmatch(r"^[0-9a-fA-F]$", data) is not None:
+                    # check to make sure password derives into key
+                    if hashes.SHA256(data) == checksum:
+                        # check checksum
+                        if self.key == kdf.derive(bytes(password, "ascii")):
+                            # only here will we have ensured
+                            # 1. our input contains password, data, and checksum
+                            # 2. our data is not malformed
+                            # 3. our checksum is correct
+                            # 4. our password  is correct
+                            self.kvs = pickle.loads(bytes.fromhex(data))
+                        else:
+                            raise ValueError("password is incorrect")
+                    else:
+                        raise ValueError(
+                            "checksum incorrect: data could not be deserialized properly"
+                        )
+                else:
+                    raise ValueError("password is incorrect")
+            else:
+                raise ValueError("data with no checksum")
 
-       If the requested title is in the notes database, then this method should return the note associated with the
-       title. If the requested title is not in the database, then thismethod should return None.
-    
-    Args:
-      title (str) : the title to fetch
-    
-    Returns: 
-      note (str) : the note associated with the requested title if
-                       it exists and otherwise None
-    """
-    if title in self.kvs:
-      return self.kvs[title]
-    return None
+    def dump(self):
+        """
+        Computes a serialized representation of the notes database
+        together with a checksum.
 
-  def set(self, title, note):
-    """Associates a note with a title and adds it to the database
-       (or updates the associated note if the title is already
-       present in the database).
+        This method should create a hex-encoded serialization of the contents of the notes database, such that it
+        may be loaded back into memory via a subsequent call to Notes.__init__(...). It should additionally
+        output a SHA-256 hash of the serialized contents (for rollback protection).
 
-       This method should insert the title together with its associated note into the database. If the title is already
-       in the database, this method will update its value. Otherwise, it will create a new entry. If note is more
-       than 2KB, this method should abort with a ValueError.
-       
-       Args:
-         title (str) : the title to set
-         note (str) : the note associated with the title
+        Returns:
+          data (str) : a hex-encoded serialized representation of the contents of the notes database (that can be passed to the constructor)
+          checksum (str) : a hex-encoded checksum for the data used to protect against rollback attacks (up to 32 characters in length)
+        """
+        serialized = pickle.dumps(self.kvs).hex()
+        checksum = hashes.SHA256(serialized)
 
-       Returns:
-         None
+        return serialized, checksum
 
-       Raises:
-         ValueError : if note length exceeds the maximum
-    """
-    if len(note) > self.MAX_NOTE_LEN:
-      raise ValueError('Maximum note length exceeded')
-    
-    self.kvs[title] = note
+    def get(self, title):
+        """
+        Fetches the note associated with a title.
 
+           If the requested title is in the notes database, then this method should return the note associated with the
+           title. If the requested title is not in the database, then thismethod should return None.
 
-  def remove(self, title):
-    """Removes the note for the requested title from the database.
+        Args:
+          title (str) : the title to fetch
 
-       Removes the target title fromthe database. If the requested title is found, then this method should remove
-       it and return True. If the title is not found, return False.
-       
-       Args:
-         title (str) : the title to remove
+        Returns:
+          note (str) : the note associated with the requested title if
+                           it exists and otherwise None
+        """
+        if title in self.kvs:
+            return self.kvs[title]
+        return None
 
-       Returns:
-         success (bool) : True if the title was removed and False if the title was
-                          not found
-    """
-    if title in self.kvs:
-      del self.kvs[title]
-      return True
+    def set(self, title, note):
+        """
+        Associates a note with a title and adds it to the database
+        (or updates the associated note if the title is already
+        present in the database).
 
-    return False
+        This method should insert the title together with its associated note into the database. If the title is already
+        in the database, this method will update its value. Otherwise, it will create a new entry. If note is more
+        than 2KB, this method should abort with a ValueError.
+
+        Args:
+          title (str) : the title to set
+          note (str) : the note associated with the title
+
+        Returns:
+          None
+
+        Raises:
+          ValueError : if note length exceeds the maximum
+        """
+        if len(note) > self.MAX_NOTE_LEN:
+            raise ValueError("Maximum note length exceeded")
+
+        self.kvs[title] = note
+
+    def remove(self, title):
+        """
+        Removes the note for the requested title from the database.
+
+        Removes the target title fromthe database. If the requested title is found, then this method should remove
+        it and return True. If the title is not found, return False.
+
+        Args:
+          title (str) : the title to remove
+
+        Returns:
+          success (bool) : True if the title was removed and False if the title was
+                           not found
+        """
+        if title in self.kvs:
+            del self.kvs[title]
+            return True
+
+        return False
