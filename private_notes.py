@@ -56,6 +56,7 @@ assume that the adversary has complete knowledge of your source code.
 from multiprocessing.sharedctypes import Value
 import os
 import pickle
+import hashlib
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat import backends
@@ -104,24 +105,28 @@ class PrivNotes:
         if data is None:
             self.kvs = {}
             self.key = kdf.derive(bytes(password, "ascii"))
+            print(self.key)
         # case 2: If data is not none, check inputs and load notes from data
         else:
+            print(self)
             # if we have a data value, we need a checksum value
             if checksum is not None:
                 # check to make sure data is not malformed
-                if re.fullmatch(r"^[0-9a-fA-F]$", data) is not None:
-                    # check to make sure password derives into key
-                    if hashes.SHA256(data) == checksum:
-                        # check checksum
-                        if self.key == kdf.derive(bytes(password, "ascii")):
-                            # only here will we have ensured
-                            # 1. our input contains password, data, and checksum
-                            # 2. our data is not malformed
-                            # 3. our checksum is correct
-                            # 4. our password  is correct
-                            self.kvs = pickle.loads(bytes.fromhex(data))
-                        else:
-                            raise ValueError("password is incorrect")
+                if re.fullmatch(r"^[0-9a-fA-F]*$", data) is not None:
+                    # check checksum
+                    # old - hashlib.sha256(data)
+                    # old - if hashlib.sha256(data.encode("utf-8")).hexdigest() == checksum:
+                    byte_array_data = bytes(data, "ascii")
+                    if hashlib.sha256(byte_array_data).hexdigest() == checksum:
+                        # check to make sure password derives into key
+                        # old - self.key == kdf.derive(bytes(password, "ascii"))
+                        kdf.verify(bytes(password, "ascii"), self.key)
+                        # only here will we have ensured
+                        # 1. our input contains password, data, and checksum
+                        # 2. our data is not malformed
+                        # 3. our checksum is correct
+                        # 4. our password  is correct
+                        self.kvs = pickle.loads(bytes.fromhex(data))
                     else:
                         raise ValueError(
                             "checksum incorrect: data could not be deserialized properly"
@@ -144,10 +149,13 @@ class PrivNotes:
           data (str) : a hex-encoded serialized representation of the contents of the notes database (that can be passed to the constructor)
           checksum (str) : a hex-encoded checksum for the data used to protect against rollback attacks (up to 32 characters in length)
         """
-        serialized = pickle.dumps(self.kvs).hex()
-        checksum = hashes.SHA256(serialized)
+        ser_data = pickle.dumps(self.kvs).hex()
+        # hashlib.SHA256(pickle.loads(bytes.fromhex(ser_data)))
+        # checksum = hashlib.sha256(ser_data.encode("utf-8")).hexdigest()
+        byte_array_checksum = bytes(ser_data, "ascii")
+        checksum = hashlib.sha256(byte_array_checksum).hexdigest()
 
-        return serialized, checksum
+        return ser_data, checksum
 
     def get(self, title):
         """
