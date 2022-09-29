@@ -58,8 +58,10 @@ import os
 import pickle
 import hashlib
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
-from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives import hashes, hmac
 from cryptography.hazmat import backends
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 import re
 
 
@@ -104,37 +106,48 @@ class PrivNotes:
         # provided password as the password
         if data is None:
             self.kvs = {}
+            self.iv = os.urandom(16)
             self.key = kdf.derive(bytes(password, "ascii"))
-            print(self.key)
+            aes_key = hashlib.sha256(bytes(password, "ascii"))
+            cipher = Cipher(algorithms.AES(aes_key), modes.CBC(self.iv))
+            encryptor = cipher.encryptor()
+            self.encryptedkey = encryptor.update(self.key) + encryptor.finalize()
         # case 2: If data is not none, check inputs and load notes from data
         else:
-            print(self)
-            # if we have a data value, we need a checksum value
-            if checksum is not None:
+            # if we have a data value, we need a checksum value (go ahead and make sure it's not malformed)
+            if re.fullmatch(r"^[0-9a-fA-F]+$", checksum) is not None:
                 # check to make sure data is not malformed
-                if re.fullmatch(r"^[0-9a-fA-F]*$", data) is not None:
-                    # check checksum
-                    # old - hashlib.sha256(data)
-                    # old - if hashlib.sha256(data.encode("utf-8")).hexdigest() == checksum:
-                    byte_array_data = bytes(data, "ascii")
-                    if hashlib.sha256(byte_array_data).hexdigest() == checksum:
-                        # check to make sure password derives into key
-                        # old - self.key == kdf.derive(bytes(password, "ascii"))
-                        kdf.verify(bytes(password, "ascii"), self.key)
-                        # only here will we have ensured
-                        # 1. our input contains password, data, and checksum
-                        # 2. our data is not malformed
-                        # 3. our checksum is correct
-                        # 4. our password  is correct
+                if re.fullmatch(r"^[0-9a-fA-F]+$", data) is not None:
+
+                    # check password
+                    # the password is the first 64 digits from data, bit shift to get this
+                    len_data = len(data)
+                    og_key = data[0:63]
+                    # translate our original key back to bytes
+                    og_key = bytes(og_key, "ascii")
+                    # this will throw an error if the inputted password was not used to derive the key
+                    print(password)
+                    print(bytes(password, "ascii"))
+                    print(og_key)
+                    kdf.verify(bytes(password, "ascii"), og_key)
+                    print("password has been verified")
+
+                    # now that the password is correct, check the checksum
+                    truncated_data = data[64:]
+                    if hashlib.sha256(truncated_data) == checksum:
+                        # here, we know the data and checksum are not malformed,
+                        # the password is correct (since we verified the first 64 hex digits against our kdf)
+                        # the checksum is correct (since we verified the remaining hex digits, hashed, against our checksum)
+                        # so we can load our notes
                         self.kvs = pickle.loads(bytes.fromhex(data))
                     else:
                         raise ValueError(
                             "checksum incorrect: data could not be deserialized properly"
                         )
                 else:
-                    raise ValueError("password is incorrect")
+                    raise ValueError("data is malformed")
             else:
-                raise ValueError("data with no checksum")
+                raise ValueError("checksum is malformed")
 
     def dump(self):
         """
@@ -149,11 +162,16 @@ class PrivNotes:
           data (str) : a hex-encoded serialized representation of the contents of the notes database (that can be passed to the constructor)
           checksum (str) : a hex-encoded checksum for the data used to protect against rollback attacks (up to 32 characters in length)
         """
+        # serialize data
         ser_data = pickle.dumps(self.kvs).hex()
+
         # hashlib.SHA256(pickle.loads(bytes.fromhex(ser_data)))
         # checksum = hashlib.sha256(ser_data.encode("utf-8")).hexdigest()
-        byte_array_checksum = bytes(ser_data, "ascii")
-        checksum = hashlib.sha256(byte_array_checksum).hexdigest()
+
+        checksum = hashlib.sha256(bytes(ser_data, "ascii")).hexdigest()
+
+        # or the key_hex with the ser_data to get a hex value with the first 32 digits as the key and remaining as serialized data
+        ser_data = key_hex + ser_data
 
         return ser_data, checksum
 
@@ -170,6 +188,13 @@ class PrivNotes:
         Returns:
           note (str) : the note associated with the requested title if
                            it exists and otherwise None
+        """
+
+        # need to derive a new key from "self.key"
+        """
+        h = hmac.HMAC(self.key, hashes.SHA256())
+        h.update(title)
+        hmac_title = h.finalize()
         """
         if title in self.kvs:
             return self.kvs[title]
@@ -198,6 +223,11 @@ class PrivNotes:
         if len(note) > self.MAX_NOTE_LEN:
             raise ValueError("Maximum note length exceeded")
 
+        # need to derive a new key from "self.key"
+        # h = hmac.HMAC(self.key, hashes.SHA256())
+        # h.update(title)
+        # hmac_title = h.finalize()
+
         self.kvs[title] = note
 
     def remove(self, title):
@@ -214,6 +244,11 @@ class PrivNotes:
           success (bool) : True if the title was removed and False if the title was
                            not found
         """
+        # need to derive a new key from "self.key"
+        # h = hmac.HMAC(self.key, hashes.SHA256())
+        # h.update(title)
+        # hmac_title = h.finalize()
+
         if title in self.kvs:
             del self.kvs[title]
             return True
