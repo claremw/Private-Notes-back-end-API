@@ -101,49 +101,23 @@ class PrivNotes:
             iterations=2000000,
             backend=backends.default_backend(),
         )
+        self.key = kdf.derive(bytes(password, "ascii"))
 
         # case 1: If data is not provided, then this method should initialize an empty note database with the
         # provided password as the password
         if data is None:
             self.kvs = {}
-            self.iv = os.urandom(16)
-            self.key = kdf.derive(bytes(password, "ascii"))
-            aes_key = hashlib.sha256(bytes(password, "ascii"))
-            cipher = Cipher(algorithms.AES(aes_key), modes.CBC(self.iv))
-            encryptor = cipher.encryptor()
-            self.encryptedkey = encryptor.update(self.key) + encryptor.finalize()
+            self.nonce = 0
         # case 2: If data is not none, check inputs and load notes from data
         else:
             # if we have a data value, we need a checksum value (go ahead and make sure it's not malformed)
+            # TODO: change checksum check to make sure it's just the sha256 of the data
+            # TODO: change the data check to just make sure it's still a dictionary when it's unserialized
             if re.fullmatch(r"^[0-9a-fA-F]+$", checksum) is not None:
                 # check to make sure data is not malformed
                 if re.fullmatch(r"^[0-9a-fA-F]+$", data) is not None:
-
-                    # check password
-                    # the password is the first 64 digits from data, bit shift to get this
-                    len_data = len(data)
-                    og_key = data[0:63]
-                    # translate our original key back to bytes
-                    og_key = bytes(og_key, "ascii")
-                    # this will throw an error if the inputted password was not used to derive the key
-                    print(password)
-                    print(bytes(password, "ascii"))
-                    print(og_key)
-                    kdf.verify(bytes(password, "ascii"), og_key)
-                    print("password has been verified")
-
-                    # now that the password is correct, check the checksum
-                    truncated_data = data[64:]
-                    if hashlib.sha256(truncated_data) == checksum:
-                        # here, we know the data and checksum are not malformed,
-                        # the password is correct (since we verified the first 64 hex digits against our kdf)
-                        # the checksum is correct (since we verified the remaining hex digits, hashed, against our checksum)
-                        # so we can load our notes
-                        self.kvs = pickle.loads(bytes.fromhex(data))
-                    else:
-                        raise ValueError(
-                            "checksum incorrect: data could not be deserialized properly"
-                        )
+                    print("hi")
+                # TODO: check password by making sure it can unencrypt the data
                 else:
                     raise ValueError("data is malformed")
             else:
@@ -164,14 +138,9 @@ class PrivNotes:
         """
         # serialize data
         ser_data = pickle.dumps(self.kvs).hex()
-
-        # hashlib.SHA256(pickle.loads(bytes.fromhex(ser_data)))
-        # checksum = hashlib.sha256(ser_data.encode("utf-8")).hexdigest()
-
+        # create checksum
+        # TODO: change below bc we can't use hashlib
         checksum = hashlib.sha256(bytes(ser_data, "ascii")).hexdigest()
-
-        # or the key_hex with the ser_data to get a hex value with the first 32 digits as the key and remaining as serialized data
-        ser_data = key_hex + ser_data
 
         return ser_data, checksum
 
@@ -223,12 +192,14 @@ class PrivNotes:
         if len(note) > self.MAX_NOTE_LEN:
             raise ValueError("Maximum note length exceeded")
 
-        # need to derive a new key from "self.key"
-        # h = hmac.HMAC(self.key, hashes.SHA256())
-        # h.update(title)
-        # hmac_title = h.finalize()
+        h = hmac.HMAC(self.key, hashes.SHA256())
+        h.update(title)
+        hmac_title = h.finalilze()
 
-        self.kvs[title] = note
+        aesgcm = AESGCM(self.key)
+        aes_note = aesgcm.encrypt(self.nonce, note, self.nonce)
+
+        self.kvs[hmac_title] = aes_note
 
     def remove(self, title):
         """
