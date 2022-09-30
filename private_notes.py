@@ -8,12 +8,13 @@
 from multiprocessing.sharedctypes import Value
 import os
 import pickle
+from unittest.loader import VALID_MODULE_NAME
 from attr import assoc
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 from cryptography.hazmat.primitives import hashes, hmac
 from cryptography.hazmat import backends
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+from cryptography.hazmat.primitives import padding
 
 
 class PrivNotes:
@@ -37,21 +38,29 @@ class PrivNotes:
 
             self.salt_hex = kdf._salt.hex()
             self.key = kdf.derive(bytes(password, "ascii"))
-            h = hmac.HMAC(kdf._salt, hashes.SHA256())
-            h.update(self.key)
-            keyexpanded = h.finalize()
-            self.hmac_key = keyexpanded[:16]
-            self.aes_key = keyexpanded[16:]
+            h = hmac.HMAC(self.key, hashes.SHA256())
+            h.update(b"hmackey")
+            self.hmac_key = h.finalize()
+            h = hmac.HMAC(self.key, hashes.SHA256())
+            h.update(b"aeskey")
+            self.aes_key = h.finalize()
 
             self.kvs = {}
             self.nonce = 0
-            self.nonce_bytes = (0).to_bytes(16, "little")
+
+            h = hmac.HMAC(self.key, hashes.SHA256())
+            h.update(bytes(password, "ascii"))
+            self.hmac_password = h.finalize()
+            self.kvs["hmac_password"] = self.hmac_password
 
         # case 2: If data is not none, check inputs and load notes from data
         else:
-            # derive new key with the old salt value
-            # old salt value is the first 32 hex digits
-            old_salt = bytes.fromhex(data[:32])
+            # load the kvs from data
+            self.kvs = pickle.loads(bytes.fromhex(data))
+            # retrieve the old salt
+            old_salt = self.kvs["salt"]
+            old_salt = bytes.fromhex(old_salt)
+
             kdf = PBKDF2HMAC(
                 algorithm=hashes.SHA256(),
                 length=32,
@@ -59,40 +68,39 @@ class PrivNotes:
                 iterations=2000000,
                 backend=backends.default_backend(),
             )
+
             self.nonce = 0
-            self.nonce_bytes = (0).to_bytes(16, "little")
             self.key = kdf.derive(bytes(password, "ascii"))
 
-            h = hmac.HMAC(old_salt, hashes.SHA256())
-            h.update(self.key)
-            keyexpanded = h.finalize()
-            self.hmac_key = keyexpanded[:16]
-            self.aes_key = keyexpanded[16:]
+            # check to make sure password is correct
+            h = hmac.HMAC(self.key, hashes.SHA256())
+            h.update(bytes(password, "ascii"))
+            self.hmac_password = h.finalize()
+            if self.kvs["hmac_password"] != self.hmac_password:
+                raise ValueError("password incorrect")
 
-            # if we have a data value, we need a checksum value (go ahead and make sure it's not malformed)
-            # TODO: change checksum check to make sure it's just the sha256 of the data
-            # TODO: change the data check to just make sure it's still a dictionary when it's unserialized
+            h = hmac.HMAC(self.key, hashes.SHA256())
+            h.update(b"hmackey")
+            self.hmac_key = h.finalize()
+            h = hmac.HMAC(self.key, hashes.SHA256())
+            h.update(b"aeskey")
+            self.aes_key = h.finalize()
+
+            # if we have a data value, we need a checksum value
             if checksum is not None:
                 # check to make sure data is not malformed
                 # check checksum
                 h_hash = hashes.Hash(hashes.SHA256())
-                h_hash.update(bytes(data[32:], "ascii"))
+                h_hash.update(bytes(data, "ascii"))
                 checksum_check = h_hash.finalize()
                 checksum_check = checksum_check.hex()
-                if checksum_check == checksum:
-                    # check password by making sure it can unencrypt the data
-                    self.kvs = pickle.loads(bytes.fromhex(data[32:]))
-                    aesgcm = AESGCM(self.aes_key)
-                    # calling .values on self.kvs simultaneously checks to ensure it's a dictionary
-                    aesgcm.decrypt(
-                        self.nonce_bytes, list(self.kvs.values())[0], self.nonce_bytes
-                    )
-                else:
+                if checksum_check != checksum:
                     raise ValueError("checksum incorrect")
             else:
                 raise ValueError("checksum is None")
 
     def dump(self):
+        self.kvs["salt"] = self.salt_hex
         # serialize data
         ser_data = pickle.dumps(self.kvs).hex()
         # create checksum
@@ -101,7 +109,7 @@ class PrivNotes:
         checksum = h.finalize()
         checksum = checksum.hex()
 
-        return self.salt_hex + ser_data, checksum
+        return ser_data, checksum
 
     def get(self, title):
         # need to derive a new key from "self.key"
@@ -112,11 +120,11 @@ class PrivNotes:
         aesgcm = AESGCM(self.aes_key)
 
         if hmac_title in self.kvs:
-            note_bytesarray = bytearray(self.kvs[hmac_title])
-            ad = bytes(note_bytesarray[(len(note_bytesarray) - 16) :])
-            print(ad)
-            print(len(ad))
-            note = aesgcm.decrypt(ad, self.kvs[hmac_title], ad)
+            nonce = self.kvs[hmac_title][0]
+            padded_note = aesgcm.decrypt(
+                (nonce).to_bytes(16, "little"), self.kvs[hmac_title][1], hmac_title
+            )
+            note = self.unpad(padded_note)
             return note.decode("ascii")
         return None
 
@@ -131,14 +139,13 @@ class PrivNotes:
 
         aesgcm = AESGCM(self.aes_key)
         byte_note = bytes(note, "ascii")
-        # TODO: took off "self.nonce" from 3rd parameter
-        aes_note = aesgcm.encrypt(self.nonce_bytes, byte_note, None)
+        # TODO: pad all notes to be 2048 bytes
+        padded_note = self.pad(byte_note)
+        aes_note = aesgcm.encrypt(
+            (self.nonce).to_bytes(16, "little"), padded_note, hmac_title
+        )
+        self.kvs[hmac_title] = (self.nonce, aes_note)
         self.nonce += 1
-        self.nonce_bytes = (self.nonce).to_bytes(16, "little")
-
-        self.kvs[hmac_title] = aes_note
-        print(self.nonce)
-        print(aes_note)
 
     def remove(self, title):
         # need to derive a new key from "self.key"
@@ -151,3 +158,22 @@ class PrivNotes:
             return True
 
         return False
+
+    def pad(self, unpadded_note):
+        # value is the unpadded note in bytes
+        difference = self.MAX_NOTE_LEN - len(unpadded_note)
+        padding = bytearray(b"\x11")
+        padding = padding + (b"\00" * difference)
+        padded_note = unpadded_note + padding
+        padded_note = bytes(padded_note)
+        return padded_note
+
+    def unpad(self, padded_note):
+        padded_note_array = bytearray(padded_note)
+        index = 2048
+        x = padded_note_array[2048]
+        while x == 0:
+            index = index - 1
+            x = padded_note_array[index]
+        unpadded_note = bytes(padded_note_array[:index])
+        return unpadded_note
